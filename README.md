@@ -21,7 +21,7 @@ You need to install `iperf3` on both client and server.
 
 To start iperf3 on a server you can run:
 
-    iperf3 -s
+    iperf3 -s -J
 
 To install python dependency on a client you can run:
 
