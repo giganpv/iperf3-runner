@@ -1,12 +1,14 @@
-# Script wrapper for network performance tool "iPerf3"
+# Python script for the network performance measurement tool "iPerf3"
 
 The cross-platform tool can run iperf3 bin file with options on OS: `Linux`, `macOS` and `Windows` clients.
 
+Script can run all native options for iperf tool, parallel running, repeating for get average result. 
+Implemented output in table and graph format
 
 ### Requirements
 
-* `iperf3`
-* `python3`
+* `iperf3` tool (apt install iperf3)
+* Python vesion 3
 * python libraries
 
        matplotlib
@@ -14,13 +16,11 @@ The cross-platform tool can run iperf3 bin file with options on OS: `Linux`, `ma
        argparse
        pandas
 
-   You can find more details at [requrenments.txt](requrenments.txt) file.
-
 ### Usage
-	Install on both said Client/Server iPerf tool
+	Install on both said Client/Server iPerf3 tool
  	Put python script on Client side
 	
-	On server side run iPerf with optional -s -J
+	On server side run iPerf3 with optional -s -J
 	Where -s is running in server mode, -J make output result in json format
 
     On Client:
