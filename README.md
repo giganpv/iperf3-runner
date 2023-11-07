@@ -16,17 +16,15 @@ The cross-platform tool can run iperf3 bin file with options on OS: `Linux`, `ma
 
    You can find more details at [requrenments.txt](requrenments.txt) file.
 
-You need to install `iperf3` on both client and server.
-
 ### Usage
 	Install on both said Client/Server iPerf tool
+ 	Put python script on Client side
 	
 	On server side run iPerf with optional -s -J
 	Where -s is running in server mode, -J make output result in json format
 
-    usage: run.py [-h] [--target TARGET] [-s STREAMS] -o OUTPUT [--test-time TEST_TIME] [--interval INTERVAL] [--range-from RANGE_FROM] [--range-to RANGE_TO] [--repeat REPEAT] [-p {tcp,udp}]
-
-    Performance test.
+    On Client:
+    	usage: run.py [-h] [--target TARGET] [-s STREAMS] -o OUTPUT [--test-time TEST_TIME] [--interval INTERVAL] [--range-from RANGE_FROM] [--range-to RANGE_TO] [--repeat REPEAT] [-p {tcp,udp}]
 
     optional arguments:
     -h, --help            show this help message and exit
