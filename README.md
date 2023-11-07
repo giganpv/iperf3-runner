@@ -1,8 +1,7 @@
-# Script for network performance measurement and tuning with iperf3.
+# Script wrapper for network performance tool "iPerf3"
 
-It is a cross-platform tool that can run on `Linux`, `macOS` and `Windows` clients.
+The cross-platform tool can run iperf3 bin file with options on OS: `Linux`, `macOS` and `Windows` clients.
 
-Script communicate with backend where iperf3 runs.
 
 ### Requirements
 
@@ -19,15 +18,11 @@ Script communicate with backend where iperf3 runs.
 
 You need to install `iperf3` on both client and server.
 
-To start iperf3 on a server you can run:
-
-    iperf3 -s -J
-
-To install python dependency on a client you can run:
-
-    pip3 install -r requirements.txt
-
 ### Usage
+	Install on both said Client/Server iPerf tool
+	
+	On server side run iPerf with optional -s -J
+	Where -s is running in server mode, -J make output result in json format
 
     usage: run.py [-h] [--target TARGET] [-s STREAMS] -o OUTPUT [--test-time TEST_TIME] [--interval INTERVAL] [--range-from RANGE_FROM] [--range-to RANGE_TO] [--repeat REPEAT] [-p {tcp,udp}]
 
