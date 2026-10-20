@@ -1,212 +1,269 @@
 #!/usr/bin/env python3
 """Script for network performance measurement and tuning with iperf3."""
+
 import argparse
 import datetime
 import json
-import os
+from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
-import time
-import numpy as np
-import pandas as pd
+from typing import Any, Dict, List, Optional
+
 from matplotlib import pyplot as plt
+import pandas as pd
 
-def getcmd(host, blks, test_time, stream_count, reverse, protocol, iperffile):
-    """Get iperf3 command line string."""
-    cmd = os.path.realpath(iperffile) if iperffile != "iperf" else "iperf3"
-    if platform.system() == "Windows":
-        cmd += ".exe"
-        
-    cmd += f" -c {host} -J -t {test_time}"
-    cmd += f" -M {blks}" if protocol == "tcp" else f" -u -b 100G -l {blks}"
-    
-    if not reverse:
-        cmd += " --get-server-output"
-    if stream_count > 1:
-        cmd += f" -P {stream_count}"
-    if reverse:
-        cmd += " -R"
-    return cmd
 
-def run_iperf_test(filename, data, blks, cmd, reverse, protocol, test_time):
-    """Run iperf test and parse common JSON output for TCP/UDP."""
-    print(f"Packet Size: {blks}")
-    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out, _ = proc.communicate()
-    
-    try:
-        storedata = json.loads(out.decode('utf-8'))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        print(f"Error parsing iperf output for size {blks}: {e}")
-        return
+def get_iperf_executable(custom_path: str) -> str:
+    """Определяет корректный путь к исполняемому файлу iperf3."""
+    if custom_path != "iperf":
+        exe_path = Path(custom_path).resolve()
+        if platform.system() == "Windows" and exe_path.suffix.lower() != ".exe":
+            exe_path = exe_path.with_suffix(".exe")
+        return str(exe_path)
 
-    # Определяем корневой узел данных в зависимости от направления и протокола
-    is_udp_server = (protocol == "udp" and not reverse)
-    root = storedata["server_output_json"] if is_udp_server else storedata
+    cmd = "iperf3" + (".exe" if platform.system() == "Windows" else "")
+    resolved = shutil.which(cmd)
+    return resolved if resolved else cmd
+
+
+def build_iperf_cmd(
+    iperf_bin: str,
+    host: str,
+    blks: int,
+    test_time: int,
+    streams: int,
+    reverse: bool,
+    protocol: str,
+    udp_bandwidth: str = "100G",
+) -> List[str]:
+    """Формирует список аргументов команды iperf3."""
+    cmd = [iperf_bin, "-c", host, "-J", "-t", str(test_time)]
 
     if protocol == "tcp":
-        res = round(float(root["end"]["sum_received"]["bits_per_second"]) / 1000000)
-        print(f"{'Download' if reverse else 'Upload'} Mbps: {res}")
-        
-        mode = "r" if reverse else "t"
-        data[f"list{mode}x"].append(blks)
-        data[f"list{mode}y"].append(res)
-    
-    elif protocol == "udp":
-        timerenge = np.arange(0, test_time, 1)
-        list_res = [
-            round(float(root["intervals"][t]["sum"]["bits_per_second"]) / 1000000)
-            for t in timerenge if t < len(root["intervals"])
-        ]
-        res = round(sum(list_res) / test_time) if list_res else 0
-        
-        end_sum = root["end"]["sum"]
-        procentlost = round(float(end_sum["lost_percent"])) if reverse else round(float(end_sum["bits_per_second"]))
-        jitter_ms = float(end_sum["jitter_ms"])
-        lost_packets = round(float(end_sum["lost_packets"]))
-        sent_packets = round(float(end_sum["packets"]))
-        tr_packets = round((sent_packets - lost_packets) / test_time)
+        cmd.extend(["-M", str(blks)])
+    else:
+        cmd.extend(["-u", "-b", udp_bandwidth, "-l", str(blks)])
 
-        print(f"{'Download' if reverse else 'Upload'} Mbps: {res} | Lost: {procentlost}% | Jitter: {jitter_ms}ms")
-        
-        mode = "r" if reverse else "t"
-        data[f"list{mode}x"].append(blks)
-        data[f"list{mode}y"].append(res)
-        data[f"listprocent{mode}"].append(procentlost)
-        data[f"listjitter_ms_{mode}"].append(jitter_ms)
-        data[f"tr_packets_{mode}"].append(tr_packets)
+    if streams > 1:
+        cmd.extend(["-P", str(streams)])
+    if reverse:
+        cmd.append("-R")
+    else:
+        cmd.append("--get-server-output")
 
-    add_line(filename, blks, res)
+    return cmd
 
-def get_curtime():
-    """Get current time string."""
-    return datetime.datetime.now().strftime("--%Y-%m-%d--%H.%M.%S")
 
-def add_line(filename, value1, value2):
-    """Append line to a file safely using context manager."""
-    with open(filename, "a", encoding="utf-8") as out_file:
-        out_file.write(f"{value1} {value2}\n")
+def run_iperf_test(cmd: List[str], protocol: str, reverse: bool, test_time: int) -> Optional[Dict[str, Any]]:
+    """Выполняет запуск iperf3 и возвращает распарсенные метрики."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=test_time + 15,
+        )
+    except subprocess.TimeoutExpired:
+        print("  [Error] iperf3 process timed out.")
+        return None
 
-def clean_txt_file(filename):
-    """Clear file content safely."""
-    with open(filename, "w", encoding="utf-8") as out_file:
-        out_file.truncate()
+    if not proc.stdout.strip():
+        print(f"  [Error] iperf3 returned empty output. STDERR: {proc.stderr.strip()}")
+        return None
 
-def graph(png_filename, x_1, y_1, x_2, y_2, ax_1, ay_1, ax_2, ay_2, title, max_y):
-    """Create graph based on test results."""
-    plt.figure()
-    if max_y < 1000:
-        plt.ylim(1, 1000)
+    try:
+        raw_json = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        print(f"  [Error] Failed to parse JSON: {e}")
+        return None
 
-    plt.scatter(x_1, y_1)
-    plt.scatter(x_2, y_2)
-    plt.plot(ax_1, ay_1, "o-", label="Download")
-    plt.plot(ax_2, ay_2, "o-", label="Upload")
-    plt.xlabel("Packet size")
-    plt.ylabel("Mbps")
+    if "error" in raw_json:
+        print(f"  [Error] iperf3 error: {raw_json['error']}")
+        return None
+
+    # Определяем узел с данными (для UDP без реверса метрики получателя находятся в server_output_json)
+    root = raw_json
+    if protocol == "udp" and not reverse:
+        root = raw_json.get("server_output_json", raw_json)
+
+    metrics: Dict[str, Any] = {}
+
+    try:
+        if protocol == "tcp":
+            end_data = root.get("end", {})
+            sum_received = end_data.get("sum_received") or end_data.get("sum_sent", {})
+            mbps = round(float(sum_received.get("bits_per_second", 0)) / 1_000_000, 2)
+
+            metrics = {
+                "mbps": mbps,
+                "lost_percent": 0.0,
+                "jitter_ms": 0.0,
+                "tr_packets": 0,
+            }
+            print(f"  Speed: {mbps} Mbps")
+
+        elif protocol == "udp":
+            end_sum = root.get("end", {}).get("sum", {})
+            mbps = round(float(end_sum.get("bits_per_second", 0)) / 1_000_000, 2)
+            lost_pct = round(float(end_sum.get("lost_percent", 0)), 2)
+            jitter_ms = round(float(end_sum.get("jitter_ms", 0)), 3)
+
+            lost_packets = int(end_sum.get("lost_packets", 0))
+            packets = int(end_sum.get("packets", 0))
+            tr_packets = round((packets - lost_packets) / max(test_time, 1))
+
+            metrics = {
+                "mbps": mbps,
+                "lost_percent": lost_pct,
+                "jitter_ms": jitter_ms,
+                "tr_packets": tr_packets,
+            }
+            print(f"  Speed: {mbps} Mbps | Loss: {lost_pct}% | Jitter: {jitter_ms} ms | PPS: {tr_packets}")
+
+    except KeyError as e:
+        print(f"  [Error] Missing expected JSON field: {e}")
+        return None
+
+    return metrics
+
+
+def build_graph(png_path: Path, df_summary: pd.DataFrame, df_raw: pd.DataFrame, title: str) -> None:
+    """Генерирует и сохраняет график результатов."""
+    plt.figure(figsize=(10, 6))
+
+    for direction, color, marker in [("Download", "tab:blue", "o"), ("Upload", "tab:orange", "s")]:
+        sub_raw = df_raw[df_raw["direction"] == direction]
+        sub_sum = df_summary[df_summary["direction"] == direction]
+
+        if not sub_raw.empty:
+            plt.scatter(sub_raw["packet_size"], sub_raw["mbps"], color=color, alpha=0.3, label=f"{direction} (runs)")
+        if not sub_sum.empty:
+            plt.plot(sub_sum["packet_size"], sub_sum["mbps"], color=color, marker=marker, linestyle="-", label=f"{direction} (avg)")
+
+    plt.xlabel("Packet size (bytes)")
+    plt.ylabel("Throughput (Mbps)")
     plt.title(title)
+    plt.grid(True, linestyle="--", alpha=0.6)
     plt.legend()
-    plt.savefig(png_filename)
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=300)
     plt.close()
 
-def argparse_hostname_or_ip(value):
-    """Parse command line host or IP value."""
-    allowed = re.compile(r"(?!-)[a-z0-9\.\:\[\]-]{1,253}(?<!-)$", re.IGNORECASE)
-    if not allowed.match(value):
-        raise argparse.ArgumentTypeError(f"'{value}' is an invalid host name or IP address")
-    return str(value)
 
-def argparse_positive_int(value):
-    """Parse command line positive numeric value."""
-    if not str(value).isdigit() or (int(value) <= 0):
-        raise argparse.ArgumentTypeError(f"'{value}' is an invalid positive numeric value")
-    return int(value)
-
-def add_to_csv(prot, x_1, y_1, y_2, lost_r, lost_t, jitter_ms_r, jitter_ms_t, tr_packets_r, tr_packets_t, scv_filename):
-    """Add results to CSV file."""
-    datacsv = pd.DataFrame({
-        "Packet size": x_1,
-        "Download": y_1,
-        "Upload": y_2
-    })
-    if prot == "udp":
-        datacsv["R Lost in procent"] = lost_r
-        datacsv["T Lost in procent"] = lost_t
-        datacsv["R Jitter"] = jitter_ms_r
-        datacsv["T Jitter"] = jitter_ms_t
-        datacsv["Packets received on Client"] = tr_packets_r
-        datacsv["Packets received on Backend"] = tr_packets_t
-    datacsv.to_csv(scv_filename, index=False)
-
-def get_options(args):
-    """Parse command line options."""
-    parser = argparse.ArgumentParser(description="Performance test.")
-    parser.add_argument("--target", default="127.0.0.1", type=argparse_hostname_or_ip, help="destination")
-    parser.add_argument("-s", "--streams", default=1, type=argparse_positive_int, help="number of parallel test streams")
-    parser.add_argument("-o", "--output", required=True, help="output file name")
-    parser.add_argument("--test-time", default=5, type=argparse_positive_int, help="test duration in seconds")
-    parser.add_argument("--interval", default=100, type=argparse_positive_int, help="MSS interval increment")
-    parser.add_argument("--range-from", default=100, type=argparse_positive_int, help="MSS range start")
-    parser.add_argument("--range-to", default=1500, type=argparse_positive_int, help="MSS range end")
-    parser.add_argument("--repeat", default=1, type=argparse_positive_int, help="Number of repetitions")
-    parser.add_argument("-p", "--protocol", default="tcp", choices=["tcp", "udp"], help="Protocol usage")
-    parser.add_argument("--iperf-file", default="iperf", help="Set custom name for iperf file")
-    parser.add_argument("--list-mss", nargs="+", type=int, help="MSS list. Ex: 650 800 1400")
+def parse_args(args: List[str]) -> argparse.Namespace:
+    """Валидация и парсинг параметров командной строки."""
+    parser = argparse.ArgumentParser(description="Network performance measurement via iperf3.")
+    parser.add_argument("--target", default="127.0.0.1", help="Target host / IP")
+    parser.add_argument("-s", "--streams", default=1, type=int, help="Parallel streams")
+    parser.add_argument("-o", "--output", required=True, help="Base output file name")
+    parser.add_argument("--test-time", default=5, type=int, help="Duration in seconds per test")
+    parser.add_argument("--interval", default=100, type=int, help="Step size for packet size range")
+    parser.add_argument("--range-from", default=100, type=int, help="Min packet size")
+    parser.add_argument("--range-to", default=1500, type=int, help="Max packet size")
+    parser.add_argument("--repeat", default=1, type=int, help="Number of repetitions per test")
+    parser.add_argument("-p", "--protocol", default="tcp", choices=["tcp", "udp"], help="Transport protocol")
+    parser.add_argument("--iperf-file", default="iperf", help="Path or alias for iperf3 binary")
+    parser.add_argument("--list-mss", nargs="+", type=int, help="Explicit list of packet sizes (e.g., 650 800 1400)")
 
     options = parser.parse_args(args)
     if options.range_from > options.range_to:
-        print(f"invalid range order: [{options.range_from}, {options.range_to}]")
-        sys.exit(-1)
+        parser.error(f"Invalid range: from ({options.range_from}) > to ({options.range_to})")
+    if options.test_time <= 0 or options.repeat <= 0 or options.streams <= 0:
+        parser.error("Numeric parameters (streams, test-time, repeat) must be > 0")
+
     return options
 
-def main():
-    """Run main application function."""
-    options = get_options(sys.argv[1:])
-    folder = "results" + os.path.sep
-    os.makedirs(folder, exist_ok=True)
 
-    base_name = f"{folder}{options.output}{get_curtime()}"
-    filename = base_name + ".txt"
-    scv_filename = base_name + ".csv"
-    png_filename = base_name + ".png"
+def main() -> None:
+    options = parse_args(sys.argv[1:])
+    iperf_bin = get_iperf_executable(options.iperf_file)
 
-    psize = options.list_mss if options.list_mss is not None else np.arange(options.range_from, options.range_to, options.interval)
+    output_dir = Path("results")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    clean_txt_file(filename)
-    add_line(filename, "Packet_Size", "Mbps")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_name = output_dir / f"{options.output}_{timestamp}"
 
-    data = {k: [] for k in ["listrx", "listry", "listtx", "listty", "listarx", "listary", "listatx", "listaty",
-                           "listprocentr", "listprocentt", "listjitter_ms_r", "listjitter_ms_t", "tr_packets_r", "tr_packets_t"]}
+    txt_file = base_name.with_suffix(".txt")
+    csv_file = base_name.with_suffix(".csv")
+    png_file = base_name.with_suffix(".png")
 
-    # Тестирование в обоих направлениях (Download: True, Upload: False)
-    for reverse_mode in [True, False]:
-        mode_str = "Download" if reverse_mode else "Upload"
-        cmd_all = getcmd(options.target, psize, options.test_time, options.streams, reverse_mode, options.protocol, options.iperf_file)
-        print(f"\n{mode_str} command: {cmd_all}")
-        add_line(filename, f"Command for {mode_str}", cmd_all)
-        
-        for blks in psize:
-            total_y = 0
-            cmd = getcmd(options.target, blks, options.test_time, options.streams, reverse_mode, options.protocol, options.iperf_file)
-            for _ in range(options.repeat):
-                run_iperf_test(filename, data, blks, cmd, reverse_mode, options.protocol, options.test_time)
-                y_array = data["listry"] if reverse_mode else data["listty"]
-                total_y += y_array[-1] if y_array else 0
-                
-            suffix = "r" if reverse_mode else "t"
-            x_array = data["listrx"] if reverse_mode else data["listtx"]
-            data[f"lista{suffix}x"].append(x_array[-1] if x_array else blks)
-            data[f"lista{suffix}y"].append(total_y / options.repeat)
+    if options.list_mss:
+        packet_sizes = sorted(options.list_mss)
+    else:
+        packet_sizes = list(range(options.range_from, options.range_to + 1, options.interval))
 
-    max_y = max(max(data["listry"] or [0]), max(data["listty"] or [0]), max(data["listary"] or [0]), max(data["listaty"] or [0]))
+    records = []
 
-    graph(png_filename, data["listrx"], data["listry"], data["listtx"], data["listty"],
-          data["listarx"], data["listary"], data["listatx"], data["listaty"], options.output, max_y)
+    with open(txt_file, "w", encoding="utf-8") as log:
+        log.write(f"Test against {options.target} started at {timestamp}\n")
+        log.write(f"Protocol: {options.protocol.upper()} | Streams: {options.streams}\n\n")
 
-    add_to_csv(options.protocol, data["listrx"], data["listry"], data["listty"], data["listprocentr"],
-               data["listprocentt"], data["listjitter_ms_r"], data["listjitter_ms_t"], data["tr_packets_r"], data["tr_packets_t"], scv_filename)
+        for reverse_mode in [True, False]:
+            direction = "Download" if reverse_mode else "Upload"
+            print(f"\n{'='*20} Starting {direction} tests {'='*20}")
+
+            for psize in packet_sizes:
+                print(f"\n[Testing] Direction: {direction} | Packet Size: {psize}")
+                cmd = build_iperf_cmd(
+                    iperf_bin,
+                    options.target,
+                    psize,
+                    options.test_time,
+                    options.streams,
+                    reverse_mode,
+                    options.protocol,
+                )
+
+                log.write(f"Command: {' '.join(cmd)}\n")
+
+                for rep in range(1, options.repeat + 1):
+                    if options.repeat > 1:
+                        print(f" Run #{rep}/{options.repeat}:", end="")
+
+                    result = run_iperf_test(cmd, options.protocol, reverse_mode, options.test_time)
+                    if result is not None:
+                        records.append({
+                            "direction": direction,
+                            "packet_size": psize,
+                            "repeat": rep,
+                            "mbps": result["mbps"],
+                            "lost_percent": result["lost_percent"],
+                            "jitter_ms": result["jitter_ms"],
+                            "packets_per_sec": result["tr_packets"],
+                        })
+                        log.write(f"{psize} {result['mbps']} Mbps\n")
+
+    if not records:
+        print("\n[!] No test data collected. Please verify your connection and iperf server.")
+        return
+
+    df_raw = pd.DataFrame(records)
+
+    # Агрегация средних значений
+    df_summary = (
+        df_raw.groupby(["direction", "packet_size"])[
+            ["mbps", "lost_percent", "jitter_ms", "packets_per_sec"]
+        ]
+        .mean()
+        .round(2)
+        .reset_index()
+    )
+
+    # Сохранение структурированных результатов
+    df_raw.to_csv(csv_file, index=False)
+    print(f"\nData saved to {csv_file}")
+
+    # Построение графиков
+    build_graph(png_file, df_summary, df_raw, f"Bandwidth vs Packet Size ({options.protocol.upper()})")
+    print(f"Graph saved to {png_file}")
+    print(f"Log saved to {txt_file}")
+
 
 if __name__ == "__main__":
     main()
